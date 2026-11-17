@@ -13,6 +13,7 @@
 //! tests on the host: m doom_app_host_test.
 
 pub mod clock;
+pub mod exit;
 pub mod frame;
 pub mod keys;
 pub mod paths;

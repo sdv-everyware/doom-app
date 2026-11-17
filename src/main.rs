@@ -27,6 +27,7 @@
 //! the image's (read-only) and the directory the game's own.
 
 mod clock;
+mod exit;
 mod frame;
 mod keys;
 mod paths;
@@ -123,6 +124,8 @@ fn run(args: Args) -> Result<(), String> {
     let keys = paths::keys(args.keys.as_deref().or(env("HAR_GAME_KEYS").as_deref()), runtime_dir.as_deref());
 
     let fifo = keys::Fifo::open(&keys).map_err(|e| format!("the keys' FIFO {keys}: {e}"))?;
+    // a FIFO left behind would say to the panel that a game is there
+    exit::remove_at_exit(&keys, fifo.id())?;
     log::info!("doom-app: the panel on {socket}, zone {}; keys from {keys}; the game {wad}", args.zone);
     // the panel is reached when the game first waits for it (platform.rs wait_until_shown)
     platform::install(platform::Platform::new(platform::Panel { socket, tag: args.zone.clone() }, fifo, Instant::now()));

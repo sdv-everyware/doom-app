@@ -112,7 +112,9 @@ Where the panel's socket is decides how `doom_app` runs:
 
   SELinux: `doom_app` then runs in the domain of adb's root shell. The panel's domain has no rule
   for a FIFO, so on an enforcing board (`adb shell getenforce`) the panel cannot open it: the
-  dialog says that the game runs but the panel may not send it keys, and no key arrives. Whether
+  dialog says that the game may be running but the panel may not send it keys, and no key
+  arrives. `doom_app` removes its FIFO when it ends (exit, SIGTERM, SIGINT), so a FIFO there means
+  a game; one killed with SIGKILL leaves its FIFO, which the panel then takes for a game. Whether
   the panel may map the wl_shm memory of a process in that domain, and so show the picture, is
   not checked. A domain for the game is a proposal, not made.
 

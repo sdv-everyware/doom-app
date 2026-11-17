@@ -213,6 +213,8 @@ pub fn fifo_check(is_fifo: bool, uid: u32, mode: u32, euid: u32) -> Found {
 /// The FIFO the panel writes the keys to, opened to read without ever blocking.
 pub struct Fifo {
     file: File,
+    /// The FIFO's device and inode (`id`).
+    id: (u64, u64),
 }
 
 impl Fifo {
@@ -247,7 +249,7 @@ impl Fifo {
                     if unsafe { libc::fchmod(file.as_raw_fd(), 0o660) } != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    return Ok(Fifo { file });
+                    return Ok(Fifo { file, id: (meta.dev(), meta.ino()) });
                 }
                 Found::Remake => {
                     drop(file);
@@ -275,6 +277,12 @@ impl Fifo {
                 Err(_) => return Vec::new(),
             }
         }
+    }
+
+    /// The FIFO's device and inode: the file this process took, to remove it at the end and
+    /// nothing that took its place since (exit.rs).
+    pub fn id(&self) -> (u64, u64) {
+        self.id
     }
 
     /// Drops what waits in the FIFO (a panel that started again holds no key; lines of the one
