@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn the_wad_s_whole_path_belongs_to_root_system_or_the_game() {
         // the image's: root's from / down
-        let image = chain(&[("/", ROOT), ("/product", ROOT), ("/product/etc", ROOT), ("/product/etc/doom", ROOT), ("/product/etc/doom/freedoom2.wad", o(0, 0, 0o100644))]);
+        let image = chain(&[("/", ROOT), ("/vendor", ROOT), ("/vendor/etc", ROOT), ("/vendor/etc/doom", ROOT), ("/vendor/etc/doom/freedoom2.wad", o(0, 0, 0o100644))]);
         assert!(wad_trusted(&image, 2000, 2000).is_ok());
         assert!(wad_trusted(&image, 0, 0).is_ok());
         // a run as root from a directory of root's under /data/vendor

@@ -10,12 +10,13 @@
 # If not, see <https://www.gnu.org/licenses/>.
 
 # The game of the panel (doom-app, README.md) in a product: a board product inherits this file.
-# It is experimental and off by default. Turn it on with EVERYWARE_GAME=true (in the environment
-# or the product): the image then gets doom_app, Freedoom's WAD read-only at
-# /product/etc/doom/freedoom2.wad (the module scripts/fetch-freedoom.sh writes into wad/, so the
-# WAD must be fetched before the build) and ro.vendor.everyware.game=true, by which the panel
-# shows its game button. Nothing starts doom_app in the image: a service and a SELinux domain for
-# it are not made (README.md); it is started from adb.
+# It is experimental and off by default. Turn it on with EVERYWARE_GAME=true (in the environment or
+# the product): the image then gets doom_app on the vendor partition, Freedoom's WAD read-only at
+# /vendor/etc/doom/freedoom2.wad (the module scripts/fetch-freedoom.sh writes into wad/, so the
+# WAD must be fetched before the build), the game's service in /vendor/etc/init/everyware/ (a
+# directory the board's root init imports; started when the panel runs, README.md "How it
+# starts") and ro.vendor.everyware.game=true, by which the panel shows its game button. The
+# board's policy gives doom_app its domain everyware_game.
 EVERYWARE_GAME ?= false
 ifeq ($(EVERYWARE_GAME),true)
 ifeq ($(wildcard packages/services/display_safety/utils/doom-app/wad/Android.bp),)
@@ -24,5 +25,7 @@ endif
 PRODUCT_PACKAGES += \
     doom_app \
     doom_app_freedoom2_wad
+PRODUCT_COPY_FILES += \
+    packages/services/display_safety/utils/doom-app/product/everyware_game.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/everyware/everyware_game.rc
 PRODUCT_VENDOR_PROPERTIES += ro.vendor.everyware.game=true
 endif
