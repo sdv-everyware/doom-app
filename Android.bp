@@ -1,0 +1,112 @@
+// doom_app: DOOM in the smart home panel. The engine is doomgeneric (doomgeneric/, GPL-2.0,
+// github.com/ozkl/doomgeneric); this app is its platform: the picture goes to the panel's zone
+// #zone/game over Wayland (harry's har-wayland-client), the keys come from the panel's game
+// dialog through a FIFO. Lives here and not in vendor/sdv-everyware because the Wayland client
+// shim is only visible to modules under packages/services/display_safety.
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// doomgeneric/: the files are under the GPL, version 2 or (at your option) any later version
+// (their notices; doomgeneric/LICENSE is the GPL version 2).
+license {
+    name: "doom_app_doomgeneric_license",
+    visibility: [":__subpackages__"],
+    license_kinds: ["SPDX-license-identifier-GPL-2.0-or-later"],
+    license_text: ["doomgeneric/LICENSE"],
+}
+
+// The engine as upstream has it; DG_* (doomgeneric.h) come from src/platform.rs.
+cc_library_static {
+    name: "libdoom_app_doomgeneric",
+    licenses: ["doom_app_doomgeneric_license"],
+    srcs: ["doomgeneric/*.c"],
+    cflags: [
+        // the engine's own frame, 320 x 200 words (the panel scales it to 4:3)
+        "-DDOOMGENERIC_RESX=320",
+        "-DDOOMGENERIC_RESY=200",
+        "-DNORMALUNIX",
+        "-DLINUX",
+        "-D_DEFAULT_SOURCE",
+        // code of the 1990s: its warnings are upstream's, not fixed here
+        "-Wno-error",
+        "-Wno-unused-variable",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+        "-Wno-unused-but-set-variable",
+        "-Wno-unused-const-variable",
+        "-Wno-sign-compare",
+        "-Wno-missing-field-initializers",
+        "-Wno-implicit-function-declaration",
+        "-Wno-implicit-int",
+        "-Wno-incompatible-pointer-types",
+        "-Wno-int-conversion",
+        "-Wno-parentheses",
+        "-Wno-format",
+        "-Wno-deprecated-non-prototype",
+        "-Wno-strict-prototypes",
+        "-Wno-misleading-indentation",
+        "-Wno-dangling-else",
+        "-Wno-pointer-sign",
+        "-Wno-string-plus-int",
+        "-Wno-absolute-value",
+        "-Wno-constant-conversion",
+        "-Wno-tautological-constant-out-of-range-compare",
+        "-Wno-switch",
+        "-Wno-enum-conversion",
+        "-Wno-shift-negative-value",
+    ],
+    vendor_available: true,
+    visibility: [":__subpackages__"],
+    arch: {
+        riscv64: {
+            enabled: false,
+        },
+    },
+}
+
+rust_binary {
+    name: "doom_app",
+    crate_root: "src/main.rs",
+    // our sources are Apache 2.0; the binary links the engine
+    licenses: [
+        "Android-Apache-2.0",
+        "doom_app_doomgeneric_license",
+    ],
+    rustlibs: [
+        "libclap",
+        "libhar_log",
+        // the panel's zone: connect, bind the tag, wl_shm buffers, present (zone.rs)
+        "libhar_wayland_client_bindgen",
+        "liblibc",
+        "liblog_rust",
+    ],
+    proc_macros: ["libclap_derive"],
+    static_libs: [
+        "libdoom_app_doomgeneric",
+        "libhar_wayland_client",
+        // libwayland-client's marshalling (closures over libffi); the client shim's archive does
+        // not carry it (the panel gets it with the server shim)
+        "libffi",
+    ],
+    vendor_available: true,
+    prefer_rlib: true,
+    arch: {
+        riscv64: {
+            enabled: false,
+        },
+    },
+}
+
+// The modules that need neither the engine nor the panel (src/host_tests.rs: the keys, the
+// clock, the frame's bytes, the paths), on the host: m doom_app_host_test, then
+// out_rb3/host/linux-x86/nativetest64/doom_app_host_test/.
+rust_test_host {
+    name: "doom_app_host_test",
+    crate_root: "src/host_tests.rs",
+    rustlibs: ["liblibc"],
+    test_options: {
+        unit_test: true,
+    },
+}

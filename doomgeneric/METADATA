@@ -1,0 +1,15 @@
+name: "doomgeneric"
+description:
+    "The DOOM engine (Chocolate Doom's, cut down) with a platform of six functions"
+    " (doomgeneric.h: DG_Init, DG_DrawFrame, DG_SleepMs, DG_GetTicksMs, DG_GetKey,"
+    " DG_SetWindowTitle) that a port implements. The port of this app is ../src/platform.rs."
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/ozkl/doomgeneric"
+  }
+  license_type: RESTRICTED
+  license_note:
+    "GPL-2.0: the files' notices say version 2 or (at your option) any later version;"
+    " LICENSE is the GPL version 2."
+}
