@@ -1,0 +1,25 @@
+# This program is free software: you can redistribute it and/or modify it under the terms of
+# the GNU General Public License as published by the Free Software Foundation, either version 3
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+# without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+# the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with this program.
+# If not, see <https://www.gnu.org/licenses/>.
+
+# The panel's game (doom-app, README.md "How it starts"), in images with EVERYWARE_GAME=true:
+# started when the panel runs. It waits for the panel and reaches it again when the panel comes
+# back; paused while its dialog is closed. Root, because the panel's Wayland socket in its runtime
+# directory (0750 root:oem_2900) is root's alone, and the keys' FIFO it makes there is root's
+# too. SELinux domain everyware_game (the board's sepolicy/vendor).
+service everyware_game /vendor/bin/doom_app
+    class main
+    user root
+    group root
+    disabled
+    setenv XDG_RUNTIME_DIR /data/vendor/everyware/run
+
+on property:init.svc.smarthome=running
+    start everyware_game

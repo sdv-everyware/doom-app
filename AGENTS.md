@@ -16,7 +16,7 @@ skill, the rules for every change) is `vendor/sdv-everyware/everyware/AGENTS.md`
 | `src/clock.rs`, `src/frame.rs`, `src/paths.rs` | the pausable clock and the reconnect's backoff, the frame's bytes, where the socket and the FIFO are and whom the WAD and the data may belong to |
 | `src/frame_size.c` | the engine's frame size for the Rust side: its one place is `doom_app_engine_defaults` in `Android.bp` |
 | `scripts/fetch-freedoom.sh` | the game's data (Freedoom), never in git; writes `wad/Android.bp` for the image |
-| `product/doom.mk` | the flag EVERYWARE_GAME: doom_app, the WAD and `ro.vendor.everyware.game` in the image |
+| `product/doom.mk`, `product/everyware_game.rc` | the flag EVERYWARE_GAME: doom_app, the WAD, the game's service and `ro.vendor.everyware.game` in the image |
 
 The repository is GPL-3.0-or-later (`LICENSE`); a new file of ours gets its notice (the one in
 `src/main.rs`, without a copyright line). `doomgeneric/` keeps upstream's GPL-2.0-or-later.

@@ -122,7 +122,9 @@ rust_binary {
         // not carry it (the panel gets it with the server shim)
         "libffi",
     ],
-    vendor_available: true,
+    // on the vendor partition, where the board's policy labels it (everyware_game); its service
+    // is product/everyware_game.rc
+    vendor: true,
     prefer_rlib: true,
     arch: {
         riscv64: {

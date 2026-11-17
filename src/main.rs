@@ -44,8 +44,9 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 struct Args {
     /// The game: an IWAD (Freedoom's freedoom2.wad). Default: the image's, installed when
-    /// scripts/fetch-freedoom.sh ran before the build.
-    #[arg(long, default_value = "/product/etc/doom/freedoom2.wad")]
+    /// scripts/fetch-freedoom.sh ran before the build (on the vendor partition, which the game's
+    /// SELinux domain may read).
+    #[arg(long, default_value = "/vendor/etc/doom/freedoom2.wad")]
     wad: String,
     /// Where the game keeps its settings and saves (default.cfg, savegame/), this user's alone:
     /// made 0700 if missing.

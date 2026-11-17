@@ -59,7 +59,7 @@ downloaded before, `FREEDOOM_ZIP=<file>`), checks the zip's size and SHA-256 aga
 pinned in the script and writes `wad/freedoom2.wad` with its license `wad/COPYING.txt`. GitHub
 publishes no digest for the asset: the pinned hash is the one recorded at our first download. The
 WAD is never in git. With the WAD it writes `wad/Android.bp`, the module `doom_app_freedoom2_wad`,
-which puts it read-only at `/product/etc/doom/freedoom2.wad`, `doom_app`'s default.
+which puts it read-only at `/vendor/etc/doom/freedoom2.wad`, `doom_app`'s default.
 
 The engine parses the WAD, its settings and its saves with C of the 1990s, so `doom_app` checks
 the WAD's absolute path (the one the engine opens) from `/` down: every directory and the WAD
@@ -72,16 +72,27 @@ menu.
 ## In an image: EVERYWARE_GAME
 
 The game is experimental and off by default. A board product inherits `product/doom.mk`
-(device-rb3 does); with `EVERYWARE_GAME=true` the image gets `doom_app` (`/system/bin`), the WAD
-and `ro.vendor.everyware.game=true`, by which the panel shows its game button:
+(device-rb3 does); with `EVERYWARE_GAME=true` the image gets `doom_app` (`/vendor/bin`), the WAD,
+the game's service and `ro.vendor.everyware.game=true`, by which the panel shows its game
+button:
 
 ```bash
 packages/services/display_safety/utils/doom-app/scripts/fetch-freedoom.sh   # once: wad/ and its module
 bash -c 'source device/rb3/sdv_media_db845c/tools/env.sh >/dev/null && EVERYWARE_GAME=true m'
 ```
 
-Nothing starts `doom_app` in the image: a service and a SELinux domain for it are a proposal, not
-made. It is started from adb, as below.
+## How it starts
+
+In an image with the game, init starts `doom_app` when the panel runs: the service
+`everyware_game` (`product/everyware_game.rc`, installed in `/vendor/etc/init/everyware/`, a
+directory the board's root init imports) starts on `init.svc.smarthome=running`, as root with
+`XDG_RUNTIME_DIR=/data/vendor/everyware/run`: the panel's Wayland socket there is root's alone. It
+runs in the SELinux domain `everyware_game` (device-rb3 `sepolicy/vendor/everyware_game.te`): the
+panel's socket, the keys' FIFO it makes next to it (labeled `everyware_game_fifo`, which the panel
+may write), the WAD in `/vendor/etc/doom`, its data in `/data/vendor/everyware/doom`
+(`everyware_game_data_file`); no GPU, no network. When the panel goes away the game waits for it
+and reaches it again; when the game ends, init starts it again. The panel's other processes and
+their domains: everyware's `docs/concepts/9-starting-the-app.md`.
 
 ## Run (RB3, from adb)
 
@@ -96,9 +107,8 @@ Where the panel's socket is decides how `doom_app` runs:
   in the image:
 
   ```bash
-  adb root
-  adb shell 'XDG_RUNTIME_DIR=/data/vendor/everyware/run nohup doom_app > /data/vendor/everyware/doom.log 2>&1 &'
-  adb logcat -s doom-app
+  adb logcat -s doom-app                          # init started it (How it starts)
+  adb shell stop everyware_game; adb shell start everyware_game   # as root: again
   ```
 
   Without it, the binary, the WAD and the data in a directory of root's:
@@ -106,7 +116,7 @@ Where the panel's socket is decides how `doom_app` runs:
   ```bash
   adb root
   adb shell 'mkdir -p /data/vendor/doom && chmod 0700 /data/vendor/doom'
-  adb push out_rb3/target/product/sdv_media_db845c/system/bin/doom_app /data/vendor/doom/
+  adb push out_rb3/target/product/sdv_media_db845c/vendor/bin/doom_app /data/vendor/doom/
   adb push wad/freedoom2.wad /data/vendor/doom/
   adb shell 'chmod 0644 /data/vendor/doom/freedoom2.wad'
   adb shell 'XDG_RUNTIME_DIR=/data/vendor/everyware/run nohup /data/vendor/doom/doom_app \
@@ -114,13 +124,12 @@ Where the panel's socket is decides how `doom_app` runs:
       > /data/vendor/doom/doom.log 2>&1 &'
   ```
 
-  SELinux: `doom_app` then runs in the domain of adb's root shell. The panel's domain has no rule
-  for a FIFO, so on an enforcing board (`adb shell getenforce`) the panel cannot open it: the
-  dialog says that the game may be running but the panel may not send it keys, and no key
-  arrives. `doom_app` removes its FIFO when it ends (exit, SIGTERM, SIGINT), so a FIFO there means
-  a game; one killed with SIGKILL leaves its FIFO, which the panel then takes for a game. Whether
-  the panel may map the wl_shm memory of a process in that domain, and so show the picture, is
-  not checked. A domain for the game is a proposal, not made.
+  SELinux: run from adb, `doom_app` is in the domain of adb's root shell, not `everyware_game`:
+  its FIFO gets the directory's label, which the panel's domain may not open, so on an enforcing
+  board (`adb shell getenforce`) the dialog says that the game may be running but the panel may
+  not send it keys. `doom_app` removes its FIFO when it ends (exit, SIGTERM, SIGINT), so a FIFO
+  there means a game; one killed with SIGKILL leaves its FIFO, which the panel then takes for a
+  game.
 
 - **The panel run from adb on an image without the APEX**: its socket is
   `/data/local/tmp/har-display`; `doom_app` runs as the shell user with the defaults of the
@@ -128,7 +137,7 @@ Where the panel's socket is decides how `doom_app` runs:
 
   ```bash
   adb shell 'mkdir -p /data/local/tmp/doom && chmod 0700 /data/local/tmp/doom'
-  adb push out_rb3/target/product/sdv_media_db845c/system/bin/doom_app /data/local/tmp/doom/
+  adb push out_rb3/target/product/sdv_media_db845c/vendor/bin/doom_app /data/local/tmp/doom/
   adb push wad/freedoom2.wad /data/local/tmp/doom/
   adb shell 'chmod 0644 /data/local/tmp/doom/freedoom2.wad'
   adb shell 'cd /data/local/tmp/doom && nohup ./doom_app --wad /data/local/tmp/doom/freedoom2.wad \
