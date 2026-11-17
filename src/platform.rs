@@ -55,10 +55,12 @@ pub fn frame_size() -> (u32, u32) {
 /// a frame at most this many bounded reads (keys.rs MAX_READ).
 const READS_PER_FRAME: u8 = 4;
 
-/// Where the panel is, to reach it again.
+/// Where the panel is, to reach it again, and whether it gets the engine's frames unscaled.
 pub struct Panel {
     pub socket: String,
     pub tag: String,
+    /// `--native-size` (zone.rs).
+    pub native: bool,
 }
 
 pub struct Platform {
@@ -129,7 +131,7 @@ impl Platform {
     /// One try to reach the panel; after a failure the next wait of `backoff` first.
     fn connect(&mut self, backoff: &mut Backoff) {
         let (width, height) = frame_size();
-        match Zone::connect(&self.panel.socket, &self.panel.tag, width, height) {
+        match Zone::connect(&self.panel.socket, &self.panel.tag, width, height, self.panel.native) {
             Ok(zone) => self.zone = Some(zone),
             Err(e) => {
                 let wait = backoff.wait();

@@ -62,6 +62,11 @@ struct Args {
     /// The zone the picture goes to: the panel's tag for #game/picture.
     #[arg(long, default_value = "#zone/game")]
     zone: String,
+    /// Send the engine's 320 x 200 frames as they are, for a panel that scales a zone's buffer
+    /// into its node on the GPU. Without it the frames are scaled to the size the panel
+    /// configures (zone.rs): harry's renderer draws a buffer of another size 1:1 in a corner.
+    #[arg(long)]
+    native_size: bool,
     /// The engine's own arguments, after `--`. Default: straight into the first map on the
     /// middle skill, no menu.
     #[arg(last = true)]
@@ -128,7 +133,11 @@ fn run(args: Args) -> Result<(), String> {
     exit::remove_at_exit(&keys, fifo.id())?;
     log::info!("doom-app: the panel on {socket}, zone {}; keys from {keys}; the game {wad}", args.zone);
     // the panel is reached when the game first waits for it (platform.rs wait_until_shown)
-    platform::install(platform::Platform::new(platform::Panel { socket, tag: args.zone.clone() }, fifo, Instant::now()));
+    platform::install(platform::Platform::new(
+        platform::Panel { socket, tag: args.zone.clone(), native: args.native_size },
+        fifo,
+        Instant::now(),
+    ));
 
     // The engine keeps argv for its whole life (m_argv.c myargv): the strings are never freed.
     let mut words = vec!["doom_app".to_string(), "-iwad".to_string(), wad];

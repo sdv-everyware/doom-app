@@ -16,9 +16,13 @@ stopped.
 ```
 
 `doom_app` draws no screen of its own and uses no GPU: the engine draws a 320 x 200 frame on the
-CPU, `src/zone.rs` copies it into a wl_shm buffer and presents it to the zone `#zone/game` over
-harry's Wayland client shim (har-wayland-client, the `har_zone` protocol). The panel copies the
-256 KB, uploads them as a texture and draws them into `#game/picture`, scaled to 4:3.
+CPU, `src/zone.rs` scales it to the size the panel configures for the zone (1040 x 780, 4:3, in
+the dialog), writes it into a wl_shm buffer and presents it to the zone `#zone/game` over harry's
+Wayland client shim (har-wayland-client, the `har_zone` protocol). The panel copies the 3.2 MB,
+uploads them as a texture and draws them into `#game/picture`. The `har_zone` protocol says that
+a buffer of another size is scaled into the node, but harry's renderer draws it 1:1 in the
+node's top left corner; with a renderer that scales, `--native-size` sends the 256 KB frames as
+they are and lets the panel's GPU scale them.
 
 The engine runs at 35 tics a second whatever the panel does. A frame goes to the panel once the
 panel showed the one before (its frame callback); until then it waits, and a newer frame takes its
