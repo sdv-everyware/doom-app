@@ -16,15 +16,19 @@
 //! buffer back at once and draws them into its node, scaled to the node (the zone's frame on the
 //! dashboard, 4:3). No GPU here: the engine draws on the CPU, and a frame is 256 KB.
 //!
-//! A frame waits for the panel's frame callback of the one before, as a GPU client waits for
-//! its flip: the engine's 35 frames a second never queue up behind a panel that draws fewer. The
-//! panel says whether the zone is shown (har_zone.visible): hidden, the game pauses (main.rs).
+//! The engine runs on at 35 tics a second whatever the panel does. A frame goes to the panel when
+//! the panel showed the one before (its frame callback); until then it waits in a buffer of its
+//! own, and a newer frame takes its place. So the panel always gets the newest frame as soon as
+//! it can take one, and a panel slower than 35 frames a second shows fewer frames of a game that
+//! does not slow down. The panel says whether the zone is shown (har_zone.visible): hidden, the
+//! game pauses (platform.rs).
 
 use crate::frame;
 use har_wayland_client_bindgen as hwc;
 use std::ffi::CString;
 
-/// Two buffers: one the panel may still hold for a moment after a commit, one to draw into.
+/// Two buffers: one the panel may still hold for a moment after a commit, one with the newest
+/// frame waiting for the panel.
 const BUFFERS: usize = 2;
 
 pub struct Zone {
@@ -36,9 +40,11 @@ pub struct Zone {
     height: u32,
     /// ABGR8888 when the panel takes it (no conversion there), else XRGB8888 (every wl_shm).
     fourcc: u32,
-    /// Frames presented and frames left out (the panel had not shown the one before).
+    /// The buffer with the newest frame, not yet sent: the panel has not shown the one before.
+    pending: Option<usize>,
+    /// Frames sent to the panel, and frames a newer one replaced before they could go.
     pub presented: u64,
-    pub skipped: u64,
+    pub replaced: u64,
 }
 
 impl Zone {
@@ -51,7 +57,18 @@ impl Zone {
         if conn.is_null() {
             return Err(format!("no panel on {socket} (is it running with --wayland-zones?)"));
         }
-        let mut z = Zone { conn, zone: std::ptr::null_mut(), buffers: Vec::new(), next: 0, width, height, fourcc: frame::XRGB8888, presented: 0, skipped: 0 };
+        let mut z = Zone {
+            conn,
+            zone: std::ptr::null_mut(),
+            buffers: Vec::new(),
+            next: 0,
+            width,
+            height,
+            fourcc: frame::XRGB8888,
+            pending: None,
+            presented: 0,
+            replaced: 0,
+        };
         // SAFETY: `conn` is connected; Drop takes down what was made if this fails.
         unsafe {
             if hwc::hwc_capabilities(conn) & hwc::HWC_CAP_SHM == 0 {
@@ -86,53 +103,71 @@ impl Zone {
         unsafe { hwc::hwc_zone_visible(self.zone) == 1 }
     }
 
-    /// Handles what the panel sent, waiting up to `timeout_ms` for something (0: no wait). An
-    /// error when the panel is gone.
+    /// Handles what the panel sent, waiting up to `timeout_ms` for something (0: no wait), and
+    /// sends the waiting frame when the panel can take it. An error when the panel is gone.
     pub fn dispatch(&mut self, timeout_ms: i32) -> Result<(), String> {
         // SAFETY: connected until Drop.
         let r = unsafe { hwc::hwc_dispatch_timeout(self.conn, timeout_ms.max(0)) };
         if r < 0 {
             return Err(format!("the connection to the panel broke ({})", std::io::Error::from_raw_os_error(-r)));
         }
-        Ok(())
+        self.flush()
     }
 
-    /// Sends the engine's frame (`pixels`: width x height words 0x00RRGGBB). Left out while the
-    /// panel has not shown the one before, or holds both buffers; returns whether it went.
-    pub fn present(&mut self, pixels: &[u32]) -> Result<bool, String> {
-        self.dispatch(0)?;
-        // SAFETY: the zone and the buffers live as long as self.
-        unsafe {
-            if hwc::hwc_zone_frame_pending(self.zone) == 1 {
-                self.skipped += 1;
-                return Ok(false);
+    /// Takes the engine's frame (`pixels`: width x height words 0x00RRGGBB) as the newest: into
+    /// the waiting buffer (the frame there is replaced) or a free one, and sends it when the
+    /// panel can take it. With no buffer free (the panel still holds both) the frame is left out.
+    pub fn present(&mut self, pixels: &[u32]) -> Result<(), String> {
+        let free = |z: &Zone, k: usize| {
+            // SAFETY: the buffers live as long as the zone.
+            z.pending != Some(k) && unsafe { hwc::hwc_buffer_is_busy(z.buffers[k]) } == 0
+        };
+        let target = match self.pending {
+            Some(i) => {
+                self.replaced += 1;
+                Some(i)
             }
-            let Some(i) = (0..BUFFERS).map(|k| (self.next + k) % BUFFERS).find(|&k| hwc::hwc_buffer_is_busy(self.buffers[k]) == 0) else {
-                self.skipped += 1;
-                return Ok(false);
-            };
-            let len = (self.width * self.height * 4) as usize;
-            // SAFETY: a wl_shm buffer's mapping is stride * height bytes (stride = width * 4)
-            // until hwc_buffer_destroy; the panel only reads it.
-            let dst = std::slice::from_raw_parts_mut(hwc::hwc_buffer_map(self.buffers[i]) as *mut u8, len);
-            let src = &pixels[..(self.width * self.height) as usize];
-            if self.fourcc == frame::ABGR8888 {
-                frame::to_abgr(src, dst);
-            } else {
-                frame::to_xrgb(src, dst);
-            }
-            let r = hwc::hwc_zone_present(self.zone, self.buffers[i], -1);
-            if r == -libc::EBUSY {
-                self.skipped += 1;
-                return Ok(false);
-            }
-            if r < 0 {
-                return Err(format!("present failed ({})", std::io::Error::from_raw_os_error(-r)));
-            }
-            self.next = (i + 1) % BUFFERS;
+            None => (0..BUFFERS).map(|k| (self.next + k) % BUFFERS).find(|&k| free(self, k)),
+        };
+        let Some(i) = target else {
+            self.replaced += 1;
+            return self.dispatch(0);
+        };
+        let len = (self.width * self.height * 4) as usize;
+        // SAFETY: a wl_shm buffer's mapping is stride * height bytes (stride = width * 4) until
+        // hwc_buffer_destroy; this buffer is not with the panel (free, or never sent).
+        let dst = unsafe { std::slice::from_raw_parts_mut(hwc::hwc_buffer_map(self.buffers[i]) as *mut u8, len) };
+        let src = &pixels[..(self.width * self.height) as usize];
+        if self.fourcc == frame::ABGR8888 {
+            frame::to_abgr(src, dst);
+        } else {
+            frame::to_xrgb(src, dst);
         }
+        self.pending = Some(i);
+        self.dispatch(0)
+    }
+
+    /// Sends the waiting frame if the panel showed the one before.
+    fn flush(&mut self) -> Result<(), String> {
+        let Some(i) = self.pending else { return Ok(()) };
+        // SAFETY: the zone and the buffers live as long as self.
+        let r = unsafe {
+            if hwc::hwc_zone_frame_pending(self.zone) == 1 {
+                return Ok(());
+            }
+            hwc::hwc_zone_present(self.zone, self.buffers[i], -1)
+        };
+        if r == -libc::EBUSY {
+            // the panel still holds this buffer: it was sent before; try again with the next event
+            return Ok(());
+        }
+        if r < 0 {
+            return Err(format!("present failed ({})", std::io::Error::from_raw_os_error(-r)));
+        }
+        self.pending = None;
+        self.next = (i + 1) % BUFFERS;
         self.presented += 1;
-        Ok(true)
+        Ok(())
     }
 }
 

@@ -16,10 +16,12 @@
 //! MAX_LINE is dropped whole. The engine gets the keys as DOOM's key codes (doomgeneric's
 //! doomkeys.h, the default bindings of m_controls.c).
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 
 /// A key of the panel's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,53 +138,150 @@ impl Held {
     }
 }
 
+/// The most keys waiting for the engine. A writer that sends faster than the engine takes them
+/// loses the oldest downs first: an up is kept as long as there is a down to drop, so a key
+/// does not stay down because its up was dropped.
+pub const MAX_QUEUE: usize = 64;
+
+/// The keys for the engine's next DG_GetKey calls, in the order they came.
+#[derive(Debug, Default)]
+pub struct KeyQueue {
+    keys: VecDeque<(Key, bool)>,
+    /// Keys dropped because the queue was full.
+    pub dropped: u64,
+}
+
+impl KeyQueue {
+    /// Adds a key; a full queue drops its oldest down (or, holding only ups, its oldest up).
+    pub fn push(&mut self, key: Key, down: bool) {
+        if self.keys.len() >= MAX_QUEUE {
+            match self.keys.iter().position(|(_, d)| *d) {
+                Some(i) => {
+                    self.keys.remove(i);
+                }
+                None => {
+                    self.keys.pop_front();
+                }
+            }
+            self.dropped += 1;
+        }
+        self.keys.push_back((key, down));
+    }
+
+    /// The oldest key.
+    pub fn pop(&mut self) -> Option<(Key, bool)> {
+        self.keys.pop_front()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
+/// The most bytes taken from the FIFO in one read: a writer that keeps the pipe full costs the
+/// engine one bounded read, not a loop.
+pub const MAX_READ: usize = 1024;
+
+/// What to do with the FIFO found at the path (`fifo_check`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Found {
+    /// Ours and private enough: use it.
+    Take,
+    /// Ours, but others may have it open (bits for others): make a new one.
+    Remake,
+    /// Not ours or not a FIFO: refuse, with why.
+    Refuse(String),
+}
+
+/// Whether a file at the FIFO's path (`is_fifo`, its owner `uid`, its `mode`) may be the keys'
+/// FIFO of a process of `euid`.
+pub fn fifo_check(is_fifo: bool, uid: u32, mode: u32, euid: u32) -> Found {
+    if !is_fifo {
+        Found::Refuse("not a FIFO".to_string())
+    } else if uid != euid {
+        Found::Refuse(format!("owned by uid {uid}, not by this process ({euid})"))
+    } else if mode & 0o007 != 0 {
+        Found::Remake
+    } else {
+        Found::Take
+    }
+}
+
 /// The FIFO the panel writes the keys to, opened to read without ever blocking.
 pub struct Fifo {
     file: File,
 }
 
 impl Fifo {
-    /// Opens the FIFO at `path`, made first when there is none (rw for the owner and the group:
-    /// the panel writes it). Opened for reading and writing, so the panel's closing it after
-    /// every line is no end of file; no link is followed.
+    /// Opens the FIFO at `path`, made first when there is none. What is found there is checked
+    /// on the open file, not by its path: no link is followed (O_NOFOLLOW), and it must be a
+    /// FIFO of this process's user with nothing for others (`fifo_check`); one with bits for
+    /// others is made again. Then rw for the owner and the group (the panel writes it), set on
+    /// the open file. Opened for reading and writing, so the panel's closing it after every line
+    /// is no end of file.
     pub fn open(path: &str) -> std::io::Result<Fifo> {
         let c = std::ffi::CString::new(std::path::Path::new(path).as_os_str().as_bytes())
             .map_err(|_| std::io::Error::other("a NUL in the path"))?;
-        // SAFETY: a valid C string; mkfifo creates a file and nothing else.
-        if unsafe { libc::mkfifo(c.as_ptr(), 0o660) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::EEXIST) {
-                return Err(e);
+        // SAFETY: no arguments; geteuid cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        for _ in 0..2 {
+            // SAFETY: a valid C string; mkfifo creates a file and nothing else (owner only first).
+            if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() != Some(libc::EEXIST) {
+                    return Err(e);
+                }
             }
-        } else {
-            // the umask may have taken the group's write away
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)?;
+            let meta = file.metadata()?;
+            match fifo_check(meta.file_type().is_fifo(), meta.uid(), meta.mode(), euid) {
+                Found::Take => {
+                    // SAFETY: the fd is open for the call; fchmod changes this file only.
+                    if unsafe { libc::fchmod(file.as_raw_fd(), 0o660) } != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    return Ok(Fifo { file });
+                }
+                Found::Remake => {
+                    drop(file);
+                    // unlink removes the name, never a file a link points to
+                    std::fs::remove_file(path)?;
+                }
+                Found::Refuse(why) => return Err(std::io::Error::other(why)),
+            }
         }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        if !file.metadata()?.file_type().is_fifo() {
-            return Err(std::io::Error::other("not a FIFO"));
-        }
-        Ok(Fifo { file })
+        Err(std::io::Error::other("made again, still not private"))
     }
 
-    /// What the panel wrote since the last read; empty when nothing waits.
+    /// What the panel wrote since the last read, at most MAX_READ bytes; empty when nothing
+    /// waits.
     pub fn read(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut buf = [0u8; 256];
+        let mut buf = vec![0u8; MAX_READ];
         loop {
             match self.file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    buf.truncate(n);
+                    return buf;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                // WouldBlock: nothing more now
-                Err(_) => break,
+                // WouldBlock: nothing now
+                Err(_) => return Vec::new(),
             }
         }
-        out
+    }
+
+    /// Drops what waits in the FIFO (a panel that started again holds no key; lines of the one
+    /// before must not press one). At most the pipe's capacity.
+    pub fn discard(&mut self) {
+        for _ in 0..(64 * 1024 / MAX_READ) {
+            if self.read().is_empty() {
+                break;
+            }
+        }
     }
 }
 
@@ -237,6 +336,41 @@ mod tests {
     }
 
     #[test]
+    fn a_full_queue_drops_downs_before_ups() {
+        let mut q = KeyQueue::default();
+        q.push(Key::Left, true);
+        for _ in 0..(MAX_QUEUE - 2) {
+            q.push(Key::Fire, true);
+        }
+        q.push(Key::Left, false);
+        // full: the oldest down (Left) goes, Left's up stays
+        q.push(Key::Use, true);
+        assert_eq!(q.dropped, 1);
+        let all: Vec<_> = std::iter::from_fn(|| q.pop()).collect();
+        assert_eq!(all.len(), MAX_QUEUE);
+        assert_eq!(all[0], (Key::Fire, true));
+        assert!(all.contains(&(Key::Left, false)));
+        assert_eq!(all.last(), Some(&(Key::Use, true)));
+        // only ups: the oldest up goes
+        let mut q = KeyQueue::default();
+        for _ in 0..MAX_QUEUE {
+            q.push(Key::Up, false);
+        }
+        q.push(Key::Down, false);
+        assert_eq!((q.dropped, q.pop(), q.is_empty()), (1, Some((Key::Up, false)), false));
+    }
+
+    #[test]
+    fn only_a_private_fifo_of_ours_is_taken() {
+        assert_eq!(fifo_check(true, 1000, 0o10600, 1000), Found::Take);
+        assert_eq!(fifo_check(true, 1000, 0o10660, 1000), Found::Take);
+        assert_eq!(fifo_check(true, 1000, 0o10666, 1000), Found::Remake, "others may have it open");
+        assert_eq!(fifo_check(true, 1000, 0o10602, 1000), Found::Remake);
+        assert!(matches!(fifo_check(true, 0, 0o10600, 1000), Found::Refuse(_)), "another user's");
+        assert!(matches!(fifo_check(false, 1000, 0o100600, 1000), Found::Refuse(_)), "a plain file");
+    }
+
+    #[test]
     fn the_fifo_is_made_and_read_without_blocking() {
         let dir = std::env::temp_dir().join(format!("doom-keys-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -252,9 +386,38 @@ mod tests {
         let mut lines = Lines::default();
         assert_eq!(lines.feed(&fifo.read()), vec![(Key::Up, true), (Key::Up, false)]);
         assert_eq!(fifo.read(), Vec::<u8>::new(), "the writers' close is no end of file");
+        // made private: rw for the owner and the group only
+        let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o660);
+        // a read takes at most MAX_READ bytes; discard empties the pipe
+        {
+            let mut w = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+            w.write_all(&vec![b'x'; 3 * MAX_READ]).unwrap();
+        }
+        assert_eq!(fifo.read().len(), MAX_READ);
+        fifo.discard();
+        assert!(fifo.read().is_empty());
         // opened again: the FIFO that is there is taken
         drop(fifo);
         assert!(Fifo::open(p).is_ok());
+        // one others could open is made again, private: a writer that opened the old one
+        // reaches nothing
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o666)).unwrap();
+        let _reader = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+        let mut old = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+        let mut fifo = Fifo::open(p).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o660);
+        old.write_all(b"down fire\n").unwrap();
+        assert!(fifo.read().is_empty(), "the old FIFO's writer does not reach the new one");
+        drop(fifo);
+        // a link in its place is not followed
+        std::fs::remove_file(&path).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"").unwrap();
+        std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(Fifo::open(p).is_err());
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o600, "the link's target untouched");
         // a plain file in its place is refused
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, b"").unwrap();

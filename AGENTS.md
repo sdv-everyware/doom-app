@@ -13,7 +13,8 @@ skill, the rules for every change) is `vendor/sdv-everyware/everyware/AGENTS.md`
 | `src/platform.rs` | the engine's platform: the six `DG_*` functions of `doomgeneric.h` |
 | `src/zone.rs` | the picture to the panel's zone (wl_shm over har-wayland-client) |
 | `src/keys.rs` | the keys from the panel's FIFO, as DOOM's key codes |
-| `src/clock.rs`, `src/frame.rs`, `src/paths.rs` | the pausable clock, the frame's bytes, where the socket and the FIFO are |
+| `src/clock.rs`, `src/frame.rs`, `src/paths.rs` | the pausable clock and the reconnect's backoff, the frame's bytes, where the socket and the FIFO are and whom the WAD and the data may belong to |
+| `src/frame_size.c` | the engine's frame size for the Rust side: its one place is `doom_app_engine_defaults` in `Android.bp` |
 | `scripts/fetch-freedoom.sh` | the game's data (Freedoom), never in git |
 
 The other side is smarthome-app: `src/game.rs` (the keys, the FIFO), the dialog in

@@ -17,15 +17,29 @@ license {
     license_text: ["doomgeneric/LICENSE"],
 }
 
+// The engine's frame, 320 x 200 words (the panel scales it to 4:3): the one place of its size.
+// The engine and src/frame_size.c are built with it; the Rust side reads the size from there.
+cc_defaults {
+    name: "doom_app_engine_defaults",
+    cflags: [
+        "-DDOOMGENERIC_RESX=320",
+        "-DDOOMGENERIC_RESY=200",
+    ],
+    vendor_available: true,
+    arch: {
+        riscv64: {
+            enabled: false,
+        },
+    },
+}
+
 // The engine as upstream has it; DG_* (doomgeneric.h) come from src/platform.rs.
 cc_library_static {
     name: "libdoom_app_doomgeneric",
+    defaults: ["doom_app_engine_defaults"],
     licenses: ["doom_app_doomgeneric_license"],
     srcs: ["doomgeneric/*.c"],
     cflags: [
-        // the engine's own frame, 320 x 200 words (the panel scales it to 4:3)
-        "-DDOOMGENERIC_RESX=320",
-        "-DDOOMGENERIC_RESY=200",
         "-DNORMALUNIX",
         "-DLINUX",
         "-D_DEFAULT_SOURCE",
@@ -57,13 +71,21 @@ cc_library_static {
         "-Wno-enum-conversion",
         "-Wno-shift-negative-value",
     ],
-    vendor_available: true,
     visibility: [":__subpackages__"],
-    arch: {
-        riscv64: {
-            enabled: false,
-        },
-    },
+}
+
+// The engine's frame size for the Rust side (platform.rs frame_size), from the engine's header
+// and flags.
+cc_library_static {
+    name: "libdoom_app_frame_size",
+    defaults: ["doom_app_engine_defaults"],
+    srcs: ["src/frame_size.c"],
+    local_include_dirs: ["doomgeneric"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+    visibility: [":__subpackages__"],
 }
 
 rust_binary {
@@ -85,6 +107,7 @@ rust_binary {
     proc_macros: ["libclap_derive"],
     static_libs: [
         "libdoom_app_doomgeneric",
+        "libdoom_app_frame_size",
         "libhar_wayland_client",
         // libwayland-client's marshalling (closures over libffi); the client shim's archive does
         // not carry it (the panel gets it with the server shim)

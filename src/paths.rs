@@ -12,6 +12,7 @@
 
 //! Where the game meets the panel: the panel's Wayland socket and the FIFO of the keys next to
 //! it, found as the panel finds them (wayland_bridge's socket_path; smarthome-app's game.rs).
+//! And whom the files the engine parses may belong to.
 
 /// The panel's Wayland socket: `given` (--socket, else HAR_WAYLAND_SOCKET, else har-display), a
 /// path as it is, a name in the runtime directory (XDG_RUNTIME_DIR, without one /data/local/tmp).
@@ -40,9 +41,70 @@ fn dir(runtime_dir: Option<&str>) -> &str {
     }
 }
 
+/// A file's owner and mode (st_uid, st_mode).
+#[derive(Clone, Copy, Debug)]
+pub struct Owner {
+    pub uid: u32,
+    pub mode: u32,
+}
+
+/// Whether the engine may parse the WAD (`file`) in its directory (`dir`) as `euid`: both belong
+/// to root or to this user, and nobody else may write them. Run as root, both must be root's.
+pub fn wad_trusted(file: Owner, dir: Owner, euid: u32) -> Result<(), String> {
+    for (what, o) in [("the WAD", file), ("its directory", dir)] {
+        if o.uid != 0 && o.uid != euid {
+            return Err(format!("{what} belongs to uid {}, not to root or to this user ({euid})", o.uid));
+        }
+        if o.mode & 0o022 != 0 {
+            return Err(format!("{what} may be written by others (mode {:o})", o.mode & 0o7777));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the directory of the settings and saves (`dir`) is `euid`'s alone.
+pub fn data_dir_private(dir: Owner, euid: u32) -> Result<(), String> {
+    if dir.uid != euid {
+        return Err(format!("belongs to uid {}, not to this user ({euid})", dir.uid));
+    }
+    if dir.mode & 0o077 != 0 {
+        return Err(format!("is open to others (mode {:o}; 0700 wanted)", dir.mode & 0o7777));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const fn o(uid: u32, mode: u32) -> Owner {
+        Owner { uid, mode }
+    }
+
+    #[test]
+    fn the_wad_belongs_to_root_or_the_game_and_nobody_else_writes_it() {
+        // the image's: root, read-only
+        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40755), 2000).is_ok());
+        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40755), 0).is_ok());
+        // a dev run's own copy
+        assert!(wad_trusted(o(2000, 0o100644), o(2000, 0o40700), 2000).is_ok());
+        // run as root: the shell user's copy is not taken
+        assert!(wad_trusted(o(2000, 0o100644), o(2000, 0o40755), 0).is_err());
+        assert!(wad_trusted(o(0, 0o100644), o(2000, 0o40771), 0).is_err(), "a directory the shell user may change");
+        // writable by the group or others
+        assert!(wad_trusted(o(2000, 0o100664), o(2000, 0o40755), 2000).is_err());
+        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40777), 2000).is_err());
+        // another user's
+        assert!(wad_trusted(o(1000, 0o100644), o(0, 0o40755), 2000).is_err());
+    }
+
+    #[test]
+    fn the_settings_and_saves_are_the_game_s_alone() {
+        assert!(data_dir_private(o(2000, 0o40700), 2000).is_ok());
+        assert!(data_dir_private(o(2000, 0o40750), 2000).is_err());
+        assert!(data_dir_private(o(2000, 0o40701), 2000).is_err());
+        assert!(data_dir_private(o(0, 0o40700), 2000).is_err());
+    }
 
     #[test]
     fn the_panel_s_places() {

@@ -36,8 +36,7 @@ impl Clock {
     /// for its start, and a 0 for none yet (i_timer.c basetime).
     pub fn ms(&self, now: Instant) -> u32 {
         let pause_now = self.since.map_or(Duration::ZERO, |s| now.saturating_duration_since(s));
-        let ran = now.saturating_duration_since(self.start).saturating_sub(self.paused + pause_now);
-        1 + ran.as_millis() as u32
+        ms_of(now.saturating_duration_since(self.start).saturating_sub(self.paused + pause_now))
     }
 
     /// Stops the clock at `now`; again while stopped changes nothing.
@@ -55,9 +54,55 @@ impl Clock {
     }
 }
 
+/// The engine's milliseconds after `ran` of play: a 32-bit count that wraps after 49.7 days, as
+/// the engine's own arithmetic does (i_timer.c), instead of an overflow that ends the process.
+fn ms_of(ran: Duration) -> u32 {
+    (ran.as_millis() as u32).wrapping_add(1)
+}
+
+/// How long to wait before the next try to reach the panel: 250 ms, twice as long after each
+/// failure, at most 5 s; back to the start once it was reached.
+#[derive(Clone, Copy, Debug)]
+pub struct Backoff {
+    next: Duration,
+}
+
+const BACKOFF_FIRST: Duration = Duration::from_millis(250);
+const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Backoff { next: BACKOFF_FIRST }
+    }
+}
+
+impl Backoff {
+    /// The wait before the next try.
+    pub fn wait(&mut self) -> Duration {
+        let w = self.next;
+        self.next = (self.next * 2).min(BACKOFF_MAX);
+        w
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_count_wraps_instead_of_overflowing() {
+        assert_eq!(ms_of(Duration::ZERO), 1);
+        assert_eq!(ms_of(Duration::from_millis(u64::from(u32::MAX) - 1)), u32::MAX);
+        assert_eq!(ms_of(Duration::from_millis(u64::from(u32::MAX))), 0);
+        assert_eq!(ms_of(Duration::from_millis(u64::from(u32::MAX) + 1)), 1);
+    }
+
+    #[test]
+    fn the_tries_slow_down_to_five_seconds() {
+        let mut b = Backoff::default();
+        let waits: Vec<u64> = (0..7).map(|_| b.wait().as_millis() as u64).collect();
+        assert_eq!(waits, [250, 500, 1000, 2000, 4000, 5000, 5000]);
+    }
 
     #[test]
     fn a_pause_takes_no_time() {

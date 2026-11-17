@@ -21,6 +21,11 @@
 //!  #game/picture ◄── wl_shm 320x200, 35 fps ──── zone #zone/game ◄──── DG_DrawFrame ◄─┘
 //!  dialog closed ──── har_zone.visible 0 ───────► paused: no tics, the clock stands still
 //! ```
+//!
+//! The engine parses the WAD, its settings and its saves with C of the 1990s. So the WAD and
+//! its directory must belong to root or to this user with no write for anyone else, and the
+//! settings and saves live in a directory of this user's alone (paths.rs); by default the WAD is
+//! the image's (read-only) and the directory the game's own.
 
 mod clock;
 mod frame;
@@ -32,15 +37,19 @@ mod zone;
 use clap::Parser as _;
 use clap_derive::Parser;
 use std::ffi::{c_char, CString};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::path::Path;
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// The game: an IWAD (Freedoom's freedoom2.wad, scripts/fetch-freedoom.sh).
-    #[arg(long, default_value = "/data/local/tmp/doom/freedoom2.wad")]
+    /// The game: an IWAD (Freedoom's freedoom2.wad). Default: the image's, installed when
+    /// scripts/fetch-freedoom.sh ran before the build.
+    #[arg(long, default_value = "/product/etc/doom/freedoom2.wad")]
     wad: String,
-    /// Where the game keeps its settings and saves (default.cfg, savegame/): made if missing.
-    #[arg(long, default_value = "/data/local/tmp/doom")]
+    /// Where the game keeps its settings and saves (default.cfg, savegame/), this user's alone:
+    /// made 0700 if missing.
+    #[arg(long, default_value = "/data/vendor/everyware/doom")]
     data_path: String,
     /// The panel's Wayland socket: a path, or a name in XDG_RUNTIME_DIR (else /data/local/tmp).
     /// Default: HAR_WAYLAND_SOCKET, else har-display, as the panel serves it.
@@ -74,29 +83,45 @@ fn main() {
     }
 }
 
-fn run(args: Args) -> Result<(), String> {
-    if !std::path::Path::new(&args.wad).is_file() {
-        return Err(format!("no WAD at {} (scripts/fetch-freedoom.sh, then push it)", args.wad));
+/// Who owns a file and its mode, as paths.rs judges them; a link is not followed.
+fn owner(path: &Path) -> Result<paths::Owner, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a link", path.display()));
     }
-    std::fs::create_dir_all(&args.data_path).map_err(|e| format!("{}: {e}", args.data_path))?;
+    Ok(paths::Owner { uid: meta.uid(), mode: meta.mode() })
+}
+
+fn run(args: Args) -> Result<(), String> {
+    // SAFETY: no arguments; geteuid cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let wad = Path::new(&args.wad);
+    if !wad.is_file() {
+        return Err(format!("no WAD at {} (scripts/fetch-freedoom.sh; --wad for another place)", args.wad));
+    }
+    let wad_dir = wad.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    paths::wad_trusted(owner(wad)?, owner(wad_dir)?, euid).map_err(|e| format!("{}: {e}", args.wad))?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&args.data_path)
+        .map_err(|e| format!("{}: {e}", args.data_path))?;
+    paths::data_dir_private(owner(Path::new(&args.data_path))?, euid).map_err(|e| format!("{}: {e}", args.data_path))?;
     // the engine writes its settings and saves into the working directory (m_config.c)
     std::env::set_current_dir(&args.data_path).map_err(|e| format!("{}: {e}", args.data_path))?;
+    let (width, height) = platform::frame_size();
+    if !(1..=4096).contains(&width) || !(1..=4096).contains(&height) {
+        return Err(format!("the engine was built for a frame of {width}x{height}"));
+    }
     let env = |name: &str| std::env::var(name).ok();
     let runtime_dir = env("XDG_RUNTIME_DIR");
     let socket = paths::socket(args.socket.as_deref().or(env("HAR_WAYLAND_SOCKET").as_deref()), runtime_dir.as_deref());
     let keys = paths::keys(args.keys.as_deref().or(env("HAR_GAME_KEYS").as_deref()), runtime_dir.as_deref());
 
-    let zone = zone::Zone::connect(&socket, &args.zone, platform::WIDTH, platform::HEIGHT)?;
     let fifo = keys::Fifo::open(&keys).map_err(|e| format!("the keys' FIFO {keys}: {e}"))?;
-    log::info!("doom-app: keys from {keys}, the game {}", args.wad);
-    platform::install(platform::Platform {
-        zone,
-        fifo,
-        lines: keys::Lines::default(),
-        clock: clock::Clock::new(Instant::now()),
-        held: keys::Held::default(),
-        queue: Default::default(),
-    });
+    log::info!("doom-app: the panel on {socket}, zone {}; keys from {keys}; the game {}", args.zone, args.wad);
+    // the panel is reached when the game first waits for it (platform.rs wait_until_shown)
+    platform::install(platform::Platform::new(platform::Panel { socket, tag: args.zone.clone() }, fifo, Instant::now()));
 
     // The engine keeps argv for its whole life (m_argv.c myargv): the strings are never freed.
     let mut words = vec!["doom_app".to_string(), "-iwad".to_string(), args.wad.clone()];
@@ -110,7 +135,7 @@ fn run(args: Args) -> Result<(), String> {
     // SAFETY: argc matches argv, whose strings live for the process; the platform is installed.
     unsafe { platform::doomgeneric_Create(argv.len() as i32, argv.as_mut_ptr()) };
     loop {
-        platform::with(|p| p.wait_until_shown());
+        platform::with(platform::Platform::wait_until_shown);
         // SAFETY: doomgeneric_Create ran; the engine runs on this thread only.
         unsafe { platform::doomgeneric_Tick() };
     }
