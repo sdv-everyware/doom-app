@@ -1,0 +1,6 @@
+# the game's data: fetched by scripts/fetch-freedoom.sh, never in git
+wad/
+*.wad
+*.WAD
+*.zip
+.vscode/
