@@ -1,14 +1,13 @@
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version 3
+// of the License, or (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+// without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+// the GNU General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU General Public License along with this program.
+// If not, see <https://www.gnu.org/licenses/>.
 
 //! Where the game meets the panel: the panel's Wayland socket and the FIFO of the keys next to
 //! it, found as the panel finds them (wayland_bridge's socket_path; smarthome-app's game.rs).
@@ -41,22 +40,32 @@ fn dir(runtime_dir: Option<&str>) -> &str {
     }
 }
 
-/// A file's owner and mode (st_uid, st_mode).
+/// A file's owner, group and mode (st_uid, st_gid, st_mode).
 #[derive(Clone, Copy, Debug)]
 pub struct Owner {
     pub uid: u32,
+    pub gid: u32,
     pub mode: u32,
 }
 
-/// Whether the engine may parse the WAD (`file`) in its directory (`dir`) as `euid`: both belong
-/// to root or to this user, and nobody else may write them. Run as root, both must be root's.
-pub fn wad_trusted(file: Owner, dir: Owner, euid: u32) -> Result<(), String> {
-    for (what, o) in [("the WAD", file), ("its directory", dir)] {
-        if o.uid != 0 && o.uid != euid {
-            return Err(format!("{what} belongs to uid {}, not to root or to this user ({euid})", o.uid));
+/// Android's system user and group (AID_SYSTEM): /data and /data/vendor are theirs.
+const AID_SYSTEM: u32 = 1000;
+
+/// Whether the engine may parse the WAD at the end of `chain`: the WAD's absolute path, its
+/// directories from `/` down and the WAD last, each with its owner. Nobody but root, the system
+/// user and this process (`euid`, `egid`) may change any of them, so none can be replaced
+/// between the check and the engine's open: each belongs to root, system or this user, only
+/// root's, system's or this process's group may write it, and nobody else may (OpenSSH's
+/// StrictModes, with Android's system user). Run as root, a directory of the shell user fails.
+pub fn wad_trusted(chain: &[(String, Owner)], euid: u32, egid: u32) -> Result<(), String> {
+    let users = [0, AID_SYSTEM, euid];
+    let groups = [0, AID_SYSTEM, egid];
+    for (path, o) in chain {
+        if !users.contains(&o.uid) {
+            return Err(format!("{path} belongs to uid {}, not to root, system or this user ({euid})", o.uid));
         }
-        if o.mode & 0o022 != 0 {
-            return Err(format!("{what} may be written by others (mode {:o})", o.mode & 0o7777));
+        if o.mode & 0o002 != 0 || (o.mode & 0o020 != 0 && !groups.contains(&o.gid)) {
+            return Err(format!("{path} may be written by others (mode {:o}, group {})", o.mode & 0o7777, o.gid));
         }
     }
     Ok(())
@@ -77,33 +86,51 @@ pub fn data_dir_private(dir: Owner, euid: u32) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const fn o(uid: u32, mode: u32) -> Owner {
-        Owner { uid, mode }
+    const fn o(uid: u32, gid: u32, mode: u32) -> Owner {
+        Owner { uid, gid, mode }
     }
 
+    fn chain(parts: &[(&str, Owner)]) -> Vec<(String, Owner)> {
+        parts.iter().map(|(p, o)| (p.to_string(), *o)).collect()
+    }
+
+    /// Android's own directories: / and /data/local root's, /data and /data/vendor system's,
+    /// /data/local/tmp the shell user's (rwxrwx--x).
+    const ROOT: Owner = o(0, 0, 0o40755);
+    const DATA: Owner = o(1000, 1000, 0o40771);
+    const LOCAL: Owner = o(0, 0, 0o40751);
+    const TMP: Owner = o(2000, 2000, 0o40771);
+
     #[test]
-    fn the_wad_belongs_to_root_or_the_game_and_nobody_else_writes_it() {
-        // the image's: root, read-only
-        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40755), 2000).is_ok());
-        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40755), 0).is_ok());
-        // a dev run's own copy
-        assert!(wad_trusted(o(2000, 0o100644), o(2000, 0o40700), 2000).is_ok());
-        // run as root: the shell user's copy is not taken
-        assert!(wad_trusted(o(2000, 0o100644), o(2000, 0o40755), 0).is_err());
-        assert!(wad_trusted(o(0, 0o100644), o(2000, 0o40771), 0).is_err(), "a directory the shell user may change");
-        // writable by the group or others
-        assert!(wad_trusted(o(2000, 0o100664), o(2000, 0o40755), 2000).is_err());
-        assert!(wad_trusted(o(0, 0o100644), o(0, 0o40777), 2000).is_err());
-        // another user's
-        assert!(wad_trusted(o(1000, 0o100644), o(0, 0o40755), 2000).is_err());
+    fn the_wad_s_whole_path_belongs_to_root_system_or_the_game() {
+        // the image's: root's from / down
+        let image = chain(&[("/", ROOT), ("/product", ROOT), ("/product/etc", ROOT), ("/product/etc/doom", ROOT), ("/product/etc/doom/freedoom2.wad", o(0, 0, 0o100644))]);
+        assert!(wad_trusted(&image, 2000, 2000).is_ok());
+        assert!(wad_trusted(&image, 0, 0).is_ok());
+        // a run as root from a directory of root's under /data/vendor
+        let vendor = chain(&[("/", ROOT), ("/data", DATA), ("/data/vendor", DATA), ("/data/vendor/doom", o(0, 0, 0o40700)), ("/data/vendor/doom/freedoom2.wad", o(0, 0, 0o100644))]);
+        assert!(wad_trusted(&vendor, 0, 0).is_ok());
+        // the shell user's run from /data/local/tmp
+        let shell = chain(&[("/", ROOT), ("/data", DATA), ("/data/local", LOCAL), ("/data/local/tmp", TMP), ("/data/local/tmp/doom", o(2000, 2000, 0o40700)), ("/data/local/tmp/doom/freedoom2.wad", o(2000, 2000, 0o100644))]);
+        assert!(wad_trusted(&shell, 2000, 2000).is_ok());
+        // run as root, the shell user may rename /data/local/tmp/doom away: refused, also when the
+        // directory and the WAD are root's
+        assert!(wad_trusted(&shell, 0, 0).is_err());
+        let rooted = chain(&[("/", ROOT), ("/data", DATA), ("/data/local", LOCAL), ("/data/local/tmp", TMP), ("/data/local/tmp/doom", o(0, 0, 0o40700)), ("/data/local/tmp/doom/freedoom2.wad", o(0, 0, 0o100644))]);
+        assert!(wad_trusted(&rooted, 0, 0).is_err());
+        // writable by another group or by others, owned by another user
+        assert!(wad_trusted(&chain(&[("/", ROOT), ("/w", o(2000, 2000, 0o100664))]), 2000, 2000).is_ok(), "its own group");
+        assert!(wad_trusted(&chain(&[("/", ROOT), ("/w", o(2000, 1003, 0o100664))]), 2000, 2000).is_err());
+        assert!(wad_trusted(&chain(&[("/", ROOT), ("/d", o(0, 0, 0o40777)), ("/d/w", o(0, 0, 0o100644))]), 2000, 2000).is_err());
+        assert!(wad_trusted(&chain(&[("/", ROOT), ("/w", o(10001, 10001, 0o100644))]), 2000, 2000).is_err());
     }
 
     #[test]
     fn the_settings_and_saves_are_the_game_s_alone() {
-        assert!(data_dir_private(o(2000, 0o40700), 2000).is_ok());
-        assert!(data_dir_private(o(2000, 0o40750), 2000).is_err());
-        assert!(data_dir_private(o(2000, 0o40701), 2000).is_err());
-        assert!(data_dir_private(o(0, 0o40700), 2000).is_err());
+        assert!(data_dir_private(o(2000, 2000, 0o40700), 2000).is_ok());
+        assert!(data_dir_private(o(2000, 2000, 0o40750), 2000).is_err());
+        assert!(data_dir_private(o(2000, 2000, 0o40701), 2000).is_err());
+        assert!(data_dir_private(o(0, 0, 0o40700), 2000).is_err());
     }
 
     #[test]

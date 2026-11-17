@@ -50,27 +50,54 @@ out_rb3/host/linux-x86/nativetest64/doom_app_host_test/doom_app_host_test
 
 ## The game's data
 
-`scripts/fetch-freedoom.sh` downloads Freedoom 0.13.0 from its GitHub release, checks the zip's
-SHA-256 against the one pinned in the script and writes `wad/freedoom2.wad` with its license
-`wad/COPYING.txt` (the hash is not pinned yet: the script stops and prints it). The WAD is never in
-git. With the WAD it writes `wad/Android.bp`, the module `doom_app_freedoom2_wad`, which puts it
-read-only at `/product/etc/doom/freedoom2.wad`, `doom_app`'s default; the image has it only when
-the product lists the module.
+`scripts/fetch-freedoom.sh` downloads Freedoom 0.13.0 from its GitHub release (or takes a zip
+downloaded before, `FREEDOOM_ZIP=<file>`), checks the zip's size and SHA-256 against the ones
+pinned in the script and writes `wad/freedoom2.wad` with its license `wad/COPYING.txt`. GitHub
+publishes no digest for the asset: the pinned hash is the one recorded at our first download. The
+WAD is never in git. With the WAD it writes `wad/Android.bp`, the module `doom_app_freedoom2_wad`,
+which puts it read-only at `/product/etc/doom/freedoom2.wad`, `doom_app`'s default.
 
-The engine parses the WAD, its settings and its saves with C of the 1990s, so `doom_app` refuses
-a WAD (or its directory) that someone other than root or its own user may write; run as root, both
-must be root's. Settings and saves go to `--data-path` (default `/data/vendor/everyware/doom`),
-which must be the user's alone (0700; made so when missing). Without arguments for the engine it
-starts straight into the first map (`-skill 3 -warp 1`), no menu.
+The engine parses the WAD, its settings and its saves with C of the 1990s, so `doom_app` checks
+the WAD's absolute path (the one the engine opens) from `/` down: every directory and the WAD
+belong to root, Android's system user or its own user, and nobody else may write them; run as
+root, a directory of the shell user fails. Settings and saves go to `--data-path` (default
+`/data/vendor/everyware/doom`), which must be the user's alone (0700; made so when missing).
+Without arguments for the engine it starts straight into the first map (`-skill 3 -warp 1`), no
+menu.
+
+## In an image: EVERYWARE_GAME
+
+The game is experimental and off by default. A board product inherits `product/doom.mk`
+(device-rb3 does); with `EVERYWARE_GAME=true` the image gets `doom_app` (`/system/bin`), the WAD
+and `ro.vendor.everyware.game=true`, by which the panel shows its game button:
+
+```bash
+packages/services/display_safety/utils/doom-app/scripts/fetch-freedoom.sh   # once: wad/ and its module
+bash -c 'source device/rb3/sdv_media_db845c/tools/env.sh >/dev/null && EVERYWARE_GAME=true m'
+```
+
+Nothing starts `doom_app` in the image: a service and a SELinux domain for it are a proposal, not
+made. It is started from adb, as below.
 
 ## Run (RB3, from adb)
 
-The panel runs with `--wayland-zones`. Where its socket is decides how `doom_app` runs:
+The panel runs with `--wayland-zones`, and shows the game button only with
+`ro.vendor.everyware.game=true`: an image without the game gets it once per boot, as root, before
+the panel starts (`adb shell setprop ro.vendor.everyware.game true`, then start the panel again).
+Where the panel's socket is decides how `doom_app` runs:
 
 - **The panel started by init** (its APEX), or by `run-smarthome-rb3.sh` on an image with that
   APEX: the socket and the FIFO are in the panel's runtime directory `/data/vendor/everyware/run`
-  (0750 root:oem_2900). Only root enters it, so `doom_app` runs as root (`adb root`), with its
-  binary, its WAD and its data in a directory of root's:
+  (0750 root:oem_2900). Only root enters it, so `doom_app` runs as root (`adb root`). With the game
+  in the image:
+
+  ```bash
+  adb root
+  adb shell 'XDG_RUNTIME_DIR=/data/vendor/everyware/run nohup doom_app > /data/vendor/everyware/doom.log 2>&1 &'
+  adb logcat -s doom-app
+  ```
+
+  Without it, the binary, the WAD and the data in a directory of root's:
 
   ```bash
   adb root
@@ -81,13 +108,13 @@ The panel runs with `--wayland-zones`. Where its socket is decides how `doom_app
   adb shell 'XDG_RUNTIME_DIR=/data/vendor/everyware/run nohup /data/vendor/doom/doom_app \
       --wad /data/vendor/doom/freedoom2.wad --data-path /data/vendor/doom/state \
       > /data/vendor/doom/doom.log 2>&1 &'
-  adb logcat -s doom-app
   ```
 
   SELinux: `doom_app` then runs in the domain of adb's root shell. The panel's domain has no rule
   for a FIFO, so on an enforcing board (`adb shell getenforce`) the panel cannot open it: the
-  picture may show, the keys do not arrive. Whether the panel may map the wl_shm memory of a
-  process in that domain is not checked. A domain for the game is a proposal, not made.
+  dialog says that the game runs but the panel may not send it keys, and no key arrives. Whether
+  the panel may map the wl_shm memory of a process in that domain, and so show the picture, is
+  not checked. A domain for the game is a proposal, not made.
 
 - **The panel run from adb on an image without the APEX**: its socket is
   `/data/local/tmp/har-display`; `doom_app` runs as the shell user with the defaults of the
@@ -102,7 +129,10 @@ The panel runs with `--wayland-zones`. Where its socket is decides how `doom_app
       --data-path /data/local/tmp/doom/state > doom.log 2>&1 &'
   ```
 
-`--socket` and `--keys` name the panel's socket and the FIFO when they are elsewhere.
+`--socket` and `--keys` name the panel's socket and the FIFO when they are elsewhere. `doom_app`
+refuses a FIFO of another user: after a run as root, a run as the shell user (or the other way
+round) first removes the old one (`adb shell rm /data/local/tmp/har-game-keys`, as the user who
+made it, or the one in `/data/vendor/everyware/run` as root).
 
 ## Not verified
 
@@ -113,7 +143,7 @@ panel.
 
 ## Licenses
 
-`src/`, the build and the scripts: Apache 2.0 (`LICENSE`). `doomgeneric/`: GPL-2.0, upstream's
-(`doomgeneric/LICENSE`, `doomgeneric/README.md`). `doom_app` links both, so the binary is
-conveyed under the GPL; its source is this repository. Freedoom's data: BSD
-(`wad/COPYING.txt` from the release), not in this repository.
+This repository is GPL-3.0-or-later (`LICENSE`), and so is `doom_app` as a whole: it links the
+engine, `doomgeneric/`, which is GPL-2.0 or later as upstream has it (`doomgeneric/LICENSE`,
+`doomgeneric/README.md`: upstream's commit), and harry's Apache 2.0 Wayland shim and logger.
+Freedoom's data: BSD-3-Clause (`wad/COPYING.txt` from the release), not in this repository.

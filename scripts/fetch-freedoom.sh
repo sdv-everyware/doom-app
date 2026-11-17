@@ -1,15 +1,14 @@
 #!/bin/bash
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program is free software: you can redistribute it and/or modify it under the terms of
+# the GNU General Public License as published by the Free Software Foundation, either version 3
+# of the License, or (at your option) any later version.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+# without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+# the GNU General Public License for more details.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# You should have received a copy of the GNU General Public License along with this program.
+# If not, see <https://www.gnu.org/licenses/>.
 
 # fetch-freedoom.sh: the game's data, Freedoom's freedoom2.wad (Freedoom: Phase 2, a DOOM II IWAD,
 # BSD licensed), from Freedoom's release on GitHub. The WAD is never in git (.gitignore).
@@ -22,26 +21,31 @@
 # in the image only when it was fetched before the build, and only when the product lists the
 # module (PRODUCT_PACKAGES) or it is built by name (m doom_app_freedoom2_wad).
 #
-# The zip is checked against SHA256 below before anything is unpacked: the engine reads the WAD
-# with C code of the 1990s, so only the released file goes in. An empty SHA256 (not pinned yet):
-# the script prints the zip's hash and stops; compare it with the release's page, then set it.
+# The zip is checked against its size and SHA-256 below before anything is unpacked: the engine
+# reads the WAD with C code of the 1990s, so only the released file goes in. GitHub publishes no
+# digest for this asset: the hash is the one recorded when the zip was first downloaded for this
+# repository (2026-11-17). FREEDOOM_SHA256 and FREEDOOM_SIZE override them (another release).
+# FREEDOOM_ZIP=<file>: a zip downloaded before, checked the same way, instead of a download.
 set -euo pipefail
 VERSION=0.13.0
 URL="https://github.com/freedoom/freedoom/releases/download/v$VERSION/freedoom-$VERSION.zip"
-SHA256=${FREEDOOM_SHA256:-}
+SHA256=${FREEDOOM_SHA256:-3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59}
+SIZE=${FREEDOOM_SIZE:-24143781}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$HERE/wad}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-echo ">> $URL"
-curl -fL --proto '=https' --tlsv1.2 --max-filesize 100000000 -o "$work/freedoom.zip" "$URL"
-got=$(sha256sum "$work/freedoom.zip" | cut -d' ' -f1)
-if [ -z "$SHA256" ]; then
-    echo "!! the zip's SHA-256 is $got"
-    echo "!! not pinned: check it against the release page, then set SHA256 in this script (or FREEDOOM_SHA256) and run again"
-    exit 1
+if [ -n "${FREEDOOM_ZIP:-}" ]; then
+    echo ">> $FREEDOOM_ZIP"
+    cp "$FREEDOOM_ZIP" "$work/freedoom.zip"
+else
+    echo ">> $URL"
+    curl -fL --proto '=https' --tlsv1.2 --max-filesize 100000000 -o "$work/freedoom.zip" "$URL"
 fi
+size=$(stat -c %s "$work/freedoom.zip")
+[ "$size" = "$SIZE" ] || { echo "!! $size bytes, expected $SIZE: not unpacked" >&2; exit 1; }
+got=$(sha256sum "$work/freedoom.zip" | cut -d' ' -f1)
 [ "$got" = "$SHA256" ] || { echo "!! SHA-256 $got, expected $SHA256: not unpacked" >&2; exit 1; }
 # only the two files, by their names in the zip; nothing else of it is written
 unzip -q -j -o "$work/freedoom.zip" "freedoom-$VERSION/freedoom2.wad" "freedoom-$VERSION/COPYING.txt" -d "$work/out"

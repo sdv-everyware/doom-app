@@ -8,6 +8,12 @@ third_party {
     type: GIT
     value: "https://github.com/ozkl/doomgeneric"
   }
+  version: "63e2d26a8c6b67fa922aff7782e315e548bf28e3"
+  last_upgrade_date {
+    year: 2026
+    month: 11
+    day: 17
+  }
   license_type: RESTRICTED
   license_note:
     "GPL-2.0: the files' notices say version 2 or (at your option) any later version;"

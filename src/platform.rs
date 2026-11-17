@@ -1,14 +1,13 @@
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version 3
+// of the License, or (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+// without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+// the GNU General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU General Public License along with this program.
+// If not, see <https://www.gnu.org/licenses/>.
 //! The engine's platform: the six functions doomgeneric asks of a port (doomgeneric.h), on the
 //! zone, the keys' FIFO and the game's clock. The engine calls them on the main thread only,
 //! from doomgeneric_Create and doomgeneric_Tick; the state they share is that thread's.
@@ -131,12 +130,7 @@ impl Platform {
     fn connect(&mut self, backoff: &mut Backoff) {
         let (width, height) = frame_size();
         match Zone::connect(&self.panel.socket, &self.panel.tag, width, height) {
-            Ok(zone) => {
-                // a panel that started again holds no key: what the one before wrote is dropped
-                self.fifo.discard();
-                self.lines = Lines::default();
-                self.zone = Some(zone);
-            }
+            Ok(zone) => self.zone = Some(zone),
             Err(e) => {
                 let wait = backoff.wait();
                 log::warn!("doom-app: {e}; trying again in {} ms", wait.as_millis());
@@ -150,10 +144,14 @@ impl Platform {
         self.zone.as_ref().is_some_and(Zone::visible)
     }
 
-    /// The panel is gone: the zone with it, until wait_until_shown reaches it again.
+    /// The panel is gone: the zone with it, until wait_until_shown reaches it again. What the
+    /// gone panel wrote is dropped (it may have died with a key down); what a new panel writes
+    /// from now on is kept.
     fn lose(&mut self, e: String) {
         log::warn!("doom-app: {e}; the game pauses until the panel is back");
         self.zone = None;
+        self.fifo.discard();
+        self.lines = Lines::default();
     }
 
     /// The panel's events, waiting up to `ms` (without a panel: a sleep).

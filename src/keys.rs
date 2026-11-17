@@ -1,14 +1,13 @@
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version 3
+// of the License, or (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+// without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+// the GNU General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU General Public License along with this program.
+// If not, see <https://www.gnu.org/licenses/>.
 
 //! The game's keys from the panel: lines in a FIFO, one per key that goes down or up
 //! ("down left\n", "up fire\n"), written by the panel's game dialog while its buttons are held
@@ -139,8 +138,8 @@ impl Held {
 }
 
 /// The most keys waiting for the engine. A writer that sends faster than the engine takes them
-/// loses the oldest downs first: an up is kept as long as there is a down to drop, so a key
-/// does not stay down because its up was dropped.
+/// loses its new downs; an up is never lost (a key would stay down): a full queue makes room for
+/// it by dropping an older down, or an older up of a key that has a later one.
 pub const MAX_QUEUE: usize = 64;
 
 /// The keys for the engine's next DG_GetKey calls, in the order they came.
@@ -152,18 +151,22 @@ pub struct KeyQueue {
 }
 
 impl KeyQueue {
-    /// Adds a key; a full queue drops its oldest down (or, holding only ups, its oldest up).
+    /// Adds a key. Full: a down is dropped; an up takes the place of the oldest down, or of the
+    /// oldest up that a later up of its key repeats (there is one: 64 ups of six keys).
     pub fn push(&mut self, key: Key, down: bool) {
         if self.keys.len() >= MAX_QUEUE {
-            match self.keys.iter().position(|(_, d)| *d) {
-                Some(i) => {
-                    self.keys.remove(i);
-                }
-                None => {
-                    self.keys.pop_front();
-                }
-            }
             self.dropped += 1;
+            if down {
+                return;
+            }
+            let repeated = |i: usize| {
+                let k = self.keys[i].0;
+                k == key || self.keys.iter().skip(i + 1).any(|(later, d)| *later == k && !*d)
+            };
+            let room = self.keys.iter().position(|(_, d)| *d).or_else(|| (0..self.keys.len()).find(|&i| repeated(i)));
+            if let Some(i) = room {
+                self.keys.remove(i);
+            }
         }
         self.keys.push_back((key, down));
     }
@@ -336,28 +339,37 @@ mod tests {
     }
 
     #[test]
-    fn a_full_queue_drops_downs_before_ups() {
+    fn a_full_queue_drops_downs_and_never_an_up() {
         let mut q = KeyQueue::default();
         q.push(Key::Left, true);
         for _ in 0..(MAX_QUEUE - 2) {
             q.push(Key::Fire, true);
         }
         q.push(Key::Left, false);
-        // full: the oldest down (Left) goes, Left's up stays
+        // full: a new down is dropped
         q.push(Key::Use, true);
         assert_eq!(q.dropped, 1);
+        // a new up takes the oldest down's place (Left's down; its up stays)
+        q.push(Key::Use, false);
+        assert_eq!(q.dropped, 2);
         let all: Vec<_> = std::iter::from_fn(|| q.pop()).collect();
         assert_eq!(all.len(), MAX_QUEUE);
         assert_eq!(all[0], (Key::Fire, true));
         assert!(all.contains(&(Key::Left, false)));
-        assert_eq!(all.last(), Some(&(Key::Use, true)));
-        // only ups: the oldest up goes
+        assert!(!all.contains(&(Key::Use, true)));
+        assert_eq!(all.last(), Some(&(Key::Use, false)));
+        // only ups: an up of the same key earlier goes, every key keeps its last up
         let mut q = KeyQueue::default();
-        for _ in 0..MAX_QUEUE {
+        q.push(Key::Down, false);
+        for _ in 0..(MAX_QUEUE - 1) {
             q.push(Key::Up, false);
         }
-        q.push(Key::Down, false);
-        assert_eq!((q.dropped, q.pop(), q.is_empty()), (1, Some((Key::Up, false)), false));
+        q.push(Key::Right, false);
+        let all: Vec<_> = std::iter::from_fn(|| q.pop()).collect();
+        assert_eq!(all.len(), MAX_QUEUE);
+        assert_eq!(all[0], (Key::Down, false), "Down's only up stays");
+        assert_eq!(all.last(), Some(&(Key::Right, false)));
+        assert!(all.contains(&(Key::Up, false)));
     }
 
     #[test]

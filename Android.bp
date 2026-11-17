@@ -5,7 +5,15 @@
 // shim is only visible to modules under packages/services/display_safety.
 
 package {
-    default_applicable_licenses: ["Android-Apache-2.0"],
+    default_applicable_licenses: ["doom_app_license"],
+}
+
+// This repository: GPL-3.0-or-later (LICENSE), doomgeneric/ apart.
+license {
+    name: "doom_app_license",
+    visibility: [":__subpackages__"],
+    license_kinds: ["SPDX-license-identifier-GPL-3.0-or-later"],
+    license_text: ["LICENSE"],
 }
 
 // doomgeneric/: the files are under the GPL, version 2 or (at your option) any later version
@@ -91,9 +99,10 @@ cc_library_static {
 rust_binary {
     name: "doom_app",
     crate_root: "src/main.rs",
-    // our sources are Apache 2.0; the binary links the engine
+    // the binary links the engine (GPL-2.0-or-later) and harry's Apache 2.0 shim and logger: as a
+    // whole it is conveyed under GPL-3.0-or-later
     licenses: [
-        "Android-Apache-2.0",
+        "doom_app_license",
         "doom_app_doomgeneric_license",
     ],
     rustlibs: [

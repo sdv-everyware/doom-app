@@ -1,14 +1,13 @@
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version 3
+// of the License, or (at your option) any later version.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+// This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+// without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
+// the GNU General Public License for more details.
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// You should have received a copy of the GNU General Public License along with this program.
+// If not, see <https://www.gnu.org/licenses/>.
 
 //! doom_app: DOOM in the smart home panel. The engine is doomgeneric (doomgeneric/, GPL-2.0),
 //! the game Freedoom's (a WAD from scripts/fetch-freedoom.sh); this process draws no screen of
@@ -89,18 +88,23 @@ fn owner(path: &Path) -> Result<paths::Owner, String> {
     if meta.file_type().is_symlink() {
         return Err(format!("{} is a link", path.display()));
     }
-    Ok(paths::Owner { uid: meta.uid(), mode: meta.mode() })
+    Ok(paths::Owner { uid: meta.uid(), gid: meta.gid(), mode: meta.mode() })
 }
 
 fn run(args: Args) -> Result<(), String> {
     // SAFETY: no arguments; geteuid cannot fail.
     let euid = unsafe { libc::geteuid() };
-    let wad = Path::new(&args.wad);
+    // SAFETY: no arguments; getegid cannot fail.
+    let egid = unsafe { libc::getegid() };
+    // the path the engine opens: absolute, links resolved, before the working directory changes
+    let wad = std::fs::canonicalize(&args.wad)
+        .map_err(|e| format!("no WAD at {}: {e} (scripts/fetch-freedoom.sh; --wad for another place)", args.wad))?;
     if !wad.is_file() {
-        return Err(format!("no WAD at {} (scripts/fetch-freedoom.sh; --wad for another place)", args.wad));
+        return Err(format!("{} is not a file", wad.display()));
     }
-    let wad_dir = wad.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    paths::wad_trusted(owner(wad)?, owner(wad_dir)?, euid).map_err(|e| format!("{}: {e}", args.wad))?;
+    let chain = wad.ancestors().collect::<Vec<_>>().into_iter().rev().map(|p| Ok((p.display().to_string(), owner(p)?))).collect::<Result<Vec<_>, String>>()?;
+    paths::wad_trusted(&chain, euid, egid)?;
+    let wad = wad.to_str().ok_or_else(|| format!("{}: not UTF-8", wad.display()))?.to_string();
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -119,12 +123,12 @@ fn run(args: Args) -> Result<(), String> {
     let keys = paths::keys(args.keys.as_deref().or(env("HAR_GAME_KEYS").as_deref()), runtime_dir.as_deref());
 
     let fifo = keys::Fifo::open(&keys).map_err(|e| format!("the keys' FIFO {keys}: {e}"))?;
-    log::info!("doom-app: the panel on {socket}, zone {}; keys from {keys}; the game {}", args.zone, args.wad);
+    log::info!("doom-app: the panel on {socket}, zone {}; keys from {keys}; the game {wad}", args.zone);
     // the panel is reached when the game first waits for it (platform.rs wait_until_shown)
     platform::install(platform::Platform::new(platform::Panel { socket, tag: args.zone.clone() }, fifo, Instant::now()));
 
     // The engine keeps argv for its whole life (m_argv.c myargv): the strings are never freed.
-    let mut words = vec!["doom_app".to_string(), "-iwad".to_string(), args.wad.clone()];
+    let mut words = vec!["doom_app".to_string(), "-iwad".to_string(), wad];
     words.extend(if args.engine.is_empty() { START.iter().map(|s| s.to_string()).collect() } else { args.engine.clone() });
     let argv: Vec<*mut c_char> = words
         .iter()
